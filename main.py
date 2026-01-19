@@ -68,7 +68,10 @@ async def audit_url(request: AuditRequest):
             
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.get(api_url, params=params, timeout=60.0)
+                # Add Referer header to satisfy API key restrictions
+                referer = os.getenv("APP_URL", "http://127.0.0.1:8000")
+                headers = {"Referer": referer} 
+                response = await client.get(api_url, params=params, headers=headers, timeout=60.0)
                 if response.status_code == 429:
                     print("Usage limit exceeded, falling back to mock data")
                     raise Exception("Quota exceeded")
