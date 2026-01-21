@@ -84,6 +84,33 @@ async def audit_url(request: AuditRequest):
                 lighthouse = data.get("lighthouseResult", {})
                 categories = lighthouse.get("categories", {})
                 audits = lighthouse.get("audits", {})
+                
+                # DEBUG: Print available audit keys and LCP structure
+                print("DEBUG: Available Audit Keys:", list(audits.keys()))
+                print("DEBUG: LCP Audit Raw:", audits.get("largest-contentful-paint"))
+
+                # Helper to get display value or score
+                def get_metric(key, field="displayValue"):
+                    return audits.get(key, {}).get(field, "N/A")
+                
+                def get_score(key):
+                     return audits.get(key, {}).get("score", 0)
+
+                # Extract Opportunities (audits with score < 1 and type 'opportunity')
+                opportunities = []
+                for key, audit in audits.items():
+                    if audit.get("details", {}).get("type") == "opportunity" and audit.get("score", 1) < 0.9:
+                        opportunities.append({
+                            "id": key,
+                            "title": audit.get("title"),
+                            "description": audit.get("description"),
+                            "score": audit.get("score"),
+                            "saving": audit.get("details", {}).get("overallSavingsMs", 0)
+                        })
+                
+                # Sort opportunities by estimated savings (descending) and take top 5
+                opportunities.sort(key=lambda x: x.get("saving", 0), reverse=True)
+                opportunities = opportunities[:5]
 
                 result = {
                     "url": url,
@@ -94,9 +121,18 @@ async def audit_url(request: AuditRequest):
                         "seo": categories.get("seo", {}).get("score", 0),
                     },
                     "metrics": {
-                        "fcp": audits.get("first-contentful-paint", {}).get("displayValue", "N/A"),
-                        "fcp_score": audits.get("first-contentful-paint", {}).get("score", 0),
+                        "fcp": get_metric("first-contentful-paint"),
+                        "fcp_score": get_score("first-contentful-paint"),
+                        "lcp": get_metric("largest-contentful-paint"),
+                        "lcp_score": get_score("largest-contentful-paint"),
+                        "cls": get_metric("cumulative-layout-shift"),
+                        "cls_score": get_score("cumulative-layout-shift"),
+                        "tbt": get_metric("total-blocking-time"),
+                        "tbt_score": get_score("total-blocking-time"),
+                        "si": get_metric("speed-index"),
+                        "si_score": get_score("speed-index"),
                     },
+                    "opportunities": opportunities,
                     "is_mock": False
                 }
             except httpx.HTTPStatusError as e:
@@ -116,7 +152,31 @@ async def audit_url(request: AuditRequest):
             "metrics": {
                 "fcp": "1.2 s",
                 "fcp_score": 0.85,
+                "lcp": "2.1 s",
+                "lcp_score": 0.88,
+                "cls": "0.05",
+                "cls_score": 0.95,
+                "tbt": "120 ms",
+                "tbt_score": 0.90,
+                "si": "1.8 s",
+                "si_score": 0.82
             },
+            "opportunities": [
+                {
+                    "id": "unused-javascript",
+                    "title": "Reduce unused JavaScript",
+                    "description": "Remove unused JavaScript to reduce bytes consumed by network activity.",
+                    "score": 0.65,
+                    "saving": 350
+                },
+                {
+                    "id": "modern-image-formats",
+                    "title": "Serve images in next-gen formats",
+                    "description": "Image formats like WebP and AVIF often provide better compression than PNG or JPEG.",
+                    "score": 0.70,
+                    "saving": 200
+                }
+            ],
             "is_mock": True
         }
 
