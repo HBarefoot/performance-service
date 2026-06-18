@@ -18,6 +18,8 @@ origins = [
     "http://127.0.0.1:3000",
     "https://next.henrybarefoot.com",
     "https://www.henrybarefoot.com",
+    "https://barefootdigital.dev",
+    "https://www.barefootdigital.dev",
 ]
 
 app.add_middleware(
