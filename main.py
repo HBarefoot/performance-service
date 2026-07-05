@@ -82,11 +82,11 @@ async def audit_url(request: AuditRequest):
                 # Add Referer header to satisfy API key restrictions
                 referer = os.getenv("APP_URL", "http://127.0.0.1:8000")
                 headers = {"Referer": referer}
-                # Lighthouse runs on slow pages routinely exceed 60s; retry 429s
-                # with backoff instead of falling straight back to mock data
+                # Lighthouse runs on very slow pages can take ~3 minutes; retry
+                # 429s with backoff instead of falling straight back to mock data
                 for attempt in range(3):
                     async with PAGESPEED_SEMAPHORE:
-                        response = await client.get(api_url, params=params, headers=headers, timeout=120.0)
+                        response = await client.get(api_url, params=params, headers=headers, timeout=180.0)
                     if response.status_code == 429 and attempt < 2:
                         await asyncio.sleep(2 ** attempt)
                         continue
@@ -152,8 +152,15 @@ async def audit_url(request: AuditRequest):
                 raise HTTPException(status_code=e.response.status_code, detail=f"PageSpeed API error: {e.response.text}")
 
     except Exception as e:
+        # Serve the last real audit if we have one — stale data beats fake data.
+        # Cache entries are never evicted, so expired real results are still here.
+        # Don't refresh the timestamp: the next request should retry the live API.
+        if url in CACHE and CACHE[url]["data"].get("is_mock") is False:
+            print(f"Serving stale cached audit due to: {type(e).__name__}: {e} url={url}")
+            return CACHE[url]["data"]
+
         # Include the exception type: httpx timeout errors stringify to ""
-        print(f"Using mock data due to: {type(e).__name__}: {e}")
+        print(f"Using mock data due to: {type(e).__name__}: {e} url={url}")
         # Mock Response
         result = {
             "url": url,
