@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
+import asyncio
 import httpx
 import time
 import os
@@ -33,6 +34,11 @@ app.add_middleware(
 # Simple in-memory cache: {url: {"data": ..., "timestamp": ...}}
 CACHE: Dict[str, Dict[str, Any]] = {}
 CACHE_DURATION = 600  # 10 minutes in seconds
+MOCK_CACHE_DURATION = 30  # transient failures shouldn't poison the cache for 10 minutes
+
+# PageSpeed rate-limits per second; cap concurrent upstream calls so a burst
+# of frontend requests doesn't trip the quota all at once
+PAGESPEED_SEMAPHORE = asyncio.Semaphore(2)
 
 class AuditRequest(BaseModel):
     url: str
@@ -45,11 +51,12 @@ async def audit_url(request: AuditRequest):
     if not url.startswith("http"):
         url = f"https://{url}"
 
-    # Check cache
+    # Check cache — mock entries expire quickly so real data can replace them
     now = time.time()
     if url in CACHE:
         entry = CACHE[url]
-        if now - entry["timestamp"] < CACHE_DURATION:
+        max_age = MOCK_CACHE_DURATION if entry["data"].get("is_mock") else CACHE_DURATION
+        if now - entry["timestamp"] < max_age:
             return entry["data"]
 
     # Google PageSpeed API URL
@@ -74,22 +81,26 @@ async def audit_url(request: AuditRequest):
             try:
                 # Add Referer header to satisfy API key restrictions
                 referer = os.getenv("APP_URL", "http://127.0.0.1:8000")
-                headers = {"Referer": referer} 
-                response = await client.get(api_url, params=params, headers=headers, timeout=60.0)
+                headers = {"Referer": referer}
+                # Lighthouse runs on slow pages routinely exceed 60s; retry 429s
+                # with backoff instead of falling straight back to mock data
+                for attempt in range(3):
+                    async with PAGESPEED_SEMAPHORE:
+                        response = await client.get(api_url, params=params, headers=headers, timeout=120.0)
+                    if response.status_code == 429 and attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    break
                 if response.status_code == 429:
                     print("Usage limit exceeded, falling back to mock data")
                     raise Exception("Quota exceeded")
                 response.raise_for_status()
                 data = response.json()
-                
+
                 # Extract relevant metrics
                 lighthouse = data.get("lighthouseResult", {})
                 categories = lighthouse.get("categories", {})
                 audits = lighthouse.get("audits", {})
-                
-                # DEBUG: Print available audit keys and LCP structure
-                print("DEBUG: Available Audit Keys:", list(audits.keys()))
-                print("DEBUG: LCP Audit Raw:", audits.get("largest-contentful-paint"))
 
                 # Helper to get display value or score
                 def get_metric(key, field="displayValue"):
@@ -141,7 +152,8 @@ async def audit_url(request: AuditRequest):
                 raise HTTPException(status_code=e.response.status_code, detail=f"PageSpeed API error: {e.response.text}")
 
     except Exception as e:
-        print(f"Using mock data due to: {str(e)}")
+        # Include the exception type: httpx timeout errors stringify to ""
+        print(f"Using mock data due to: {type(e).__name__}: {e}")
         # Mock Response
         result = {
             "url": url,
